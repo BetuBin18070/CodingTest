@@ -1,27 +1,23 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-# --------------------------------------------------------
-# References:
-# DeiT: https://github.com/facebookresearch/deit
-# --------------------------------------------------------
 
 import os
 import PIL
 
 from torchvision import datasets, transforms
+import torchvision
 
-from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
 
-    root = os.path.join(args.data_path, 'train' if is_train else 'val')
-    dataset = datasets.ImageFolder(root, transform=transform)
+
+    if is_train :
+        dataset = torchvision.datasets.CIFAR10(root='./data', train=True,
+                                                download=True, transform=transform)
+    else:
+        dataset = torchvision.datasets.CIFAR10(root='./data', train=False,
+                                               download=True, transform=transform)
 
     print(dataset)
 
@@ -33,19 +29,28 @@ def build_transform(is_train, args):
     std = IMAGENET_DEFAULT_STD
     # train transform
     if is_train:
-        # this should always dispatch to transforms_imagenet_train
-        transform = create_transform(
-            input_size=args.input_size,
-            is_training=True,
-            color_jitter=args.color_jitter,
-            auto_augment=args.aa,
-            interpolation='bicubic',
-            re_prob=args.reprob,
-            re_mode=args.remode,
-            re_count=args.recount,
-            mean=mean,
-            std=std,
-        )
+        #this should always dispatch to transforms_imagenet_train
+        # transform = create_transform(
+        #     input_size=args.input_size,
+        #     is_training=True,
+        #     color_jitter=args.color_jitter,
+        #     auto_augment=args.aa,
+        #     interpolation='bicubic',
+        #     re_prob=args.reprob,
+        #     re_mode=args.remode,
+        #     re_count=args.recount,
+        #     mean=mean,
+        #     std=std,
+        # )
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop((32,32),scale=(0.8,1)),
+            transforms.ColorJitter(0.1, 0.1,0.1,0.1),
+            #transforms.TrivialAugmentWide
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
+
         return transform
 
     # eval transform

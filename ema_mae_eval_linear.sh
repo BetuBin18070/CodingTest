@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+CUDA_VISIBLE_DEVICES=0  python main_linprobe.py \
+  --batch_size=2048 \
+  --epochs=100 \
+  --input_size=32 \
+  --drop_path=0 \
+  --mlp_ratio=4 \
+  --patch_size=4 \
+  --in_chans=3 \
+  --embed_dim=192 \
+  --depth=12 \
+  --num_heads=3 \
+  --weight_decay=0 \
+  --lr=1e-3 \
+  --finetune='./output_dir/ema/start34/checkpoint-199.pth' \
+  --data_path='./data' \
+  --nb_classes=10 \
+  --output_dir='./output_dir/linprobe/ema/start34/Stu/' \
+  --log_dir='./runs/linprobe/ema/start34/Stu/' \
+  --device='cuda' \
+  --seed=0 \
+  --num_workers=4

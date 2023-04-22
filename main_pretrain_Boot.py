@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import json
 import numpy as np
 import os
 import time
@@ -12,16 +13,20 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 import torchvision
+import copy
 
 import timm
-
+from timm.models.layers import trunc_normal_
 assert timm.__version__ == "0.3.2"  # version check
 
 from functools import partial
 
-from models import models_mae
+from models import models_mae_Boost
 
-from engine.engine_pretrain import train_one_epoch
+import util.criterions
+
+from engine.engine_pretrain_Boost import train_one_epoch
+
 from util.save_model import save_model
 
 
@@ -29,7 +34,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
     parser.add_argument('--batch_size', default=512, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
-    parser.add_argument('--epochs', default=34, type=int)
+    parser.add_argument('--epochs', default=200, type=int)
 
     # Model parameters
     parser.add_argument('--input_size', default=32, type=int,
@@ -60,21 +65,39 @@ def get_args_parser():
     parser.add_argument('--decoder_num_heads', default=3, type=int,
                         help='Number of heads of the decoder')
 
+    # Knowledge distillation
+    # teacher
+    parser.add_argument('--first_MAE', default='output_dir/pretrain/baseline/epoch34/checkpoint-33.pth',
+                        help='finetune from checkpoint')
+
+    parser.add_argument('--num_teacher', default=6, type=int,
+                        help='Number of teachers')
+
+    parser.add_argument('--output_feature_layers_start', default=12, type=int,
+                        help='Output feature layers of teacher')
+    parser.add_argument('--output_feature_layers_end', default=12, type=int,
+                        help='Output feature layers of teacher')
+
+    parser.add_argument('--is_BatchNorm', default=False, type=bool,
+                        help='BatchNorm as the Decoder norm')
+
+    parser.add_argument('--lr_start_from_scratch', default=False, type=bool,
+                        help='lr Starting from scratch')
+
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0.05)')
 
-    parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
+    parser.add_argument('--lr', type=float, default=4e-4, metavar='LR',
                         help='learning rate (absolute lr)')
-
 
     # Dataset parameters
     parser.add_argument('--data_path', default='./data', type=str,
                         help='dataset path')
 
-    parser.add_argument('--output_dir', default='./output_dir/pretrain/baseline/epoch34/',
+    parser.add_argument('--output_dir', default='./output_dir/pretrain/Boot/6k/6/',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./runs/pretrain/baseline/epoch34/',
+    parser.add_argument('--log_dir', default='./runs/pretrain/Boot/6k/6/',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -131,36 +154,89 @@ def main(args):
     )
 
     # define the model
-    model = models_mae.MaskedAutoencoderDeiT(img_size=args.input_size, patch_size=args.patch_size,
-                                             in_chans=args.in_chans,
-                                             embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
-                                             decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth
-                                             , decoder_num_heads=args.decoder_num_heads,
-                                             mlp_ratio=args.mlp_ratio, norm_layer=partial(nn.LayerNorm, eps=1e-6)
-                                             , norm_pix_loss=args.norm_pix_loss)
+    model_student = models_mae_Boost.MaskedAutoencoderDeiT(img_size=args.input_size, patch_size=args.patch_size,
+                                                           in_chans=args.in_chans,
+                                                           embed_dim=args.embed_dim, depth=args.depth,
+                                                           num_heads=args.num_heads,
+                                                           decoder_embed_dim=args.decoder_embed_dim,
+                                                           decoder_depth=args.decoder_depth
+                                                           , decoder_num_heads=args.decoder_num_heads,
+                                                           mlp_ratio=args.mlp_ratio
+                                                           , output_feature_layers_start=args.output_feature_layers_start,
+                                                           output_feature_layers_end=args.output_feature_layers_end,
+                                                           output_dim=args.embed_dim,
+                                                           is_teacher=False, norm_layer=partial(nn.LayerNorm, eps=1e-6)
+                                                           , norm_pix_loss=args.norm_pix_loss
+                                                           , is_BatchNorm=args.is_BatchNorm)
 
-    model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay)
+
+    checkpoint = torch.load(args.first_MAE, map_location='cpu')
+
+    checkpoint_model = checkpoint["model"]
+
+    del checkpoint_model["decoder_pred.weight"]
+    del checkpoint_model["decoder_pred.bias"]
+
+    model_student.load_state_dict(checkpoint_model, strict=False)
+
+    trunc_normal_(model_student.decoder_pred.weight, std=0.01)
+
+    model_student.to(device)
+    optimizer = torch.optim.AdamW(model_student.parameters(), lr=args.lr, betas=(0.9, 0.95),
+                                  weight_decay=args.weight_decay)
     print(optimizer)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    for epoch in range(args.epochs):
+
+    # 0->199
+    epoch_alt = args.epochs // args.num_teacher
+
+    # define teacher
+    model_teacher = copy.deepcopy(model_student)
+    model_teacher.eval().requires_grad_(False)
+    model_teacher.to(device)
+    model_teacher.is_teacher = True
+
+
+
+    criterion = util.criterions.base_mse_loss()
+    for epoch in range(epoch_alt,args.epochs):
+
+        
 
         epoch_loss = train_one_epoch(
-            model, data_loader_train,
+            model_student, model_teacher, data_loader_train,
             optimizer, device, epoch,
+            criterion,
             log_writer=log_writer,
             args=args
         )
         if log_writer is not None:
             log_writer.add_scalar('/pretrain/baseline/loss', epoch_loss, epoch)
             log_writer.flush()
-        if epoch == args.epochs - 1:
+        if epoch == args.epochs:
             save_model(
-                args, epoch, model, optimizer
+                args, epoch, model_student, optimizer
+            )
+        
+        
+        if (epoch + 1) % epoch_alt == 0:
+
+            model_teacher = copy.deepcopy(model_student)
+            model_teacher.to(device)
+            model_teacher.is_teacher = True
+
+            save_model(
+                args, epoch, model_student, optimizer
             )
 
+            if args.lr_start_from_scratch:
+                optimizer = torch.optim.AdamW(model_student.parameters(), lr=args.lr, betas=(0.9, 0.95),
+                                              weight_decay=args.weight_decay)
+            # optimizer=???
+        
+        
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
